@@ -1,4 +1,4 @@
-// Copyright 2023-2024 Chainguard, Inc.
+// Copyright 2023-2026 Chainguard, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -179,7 +179,7 @@ static const struct feature_ signature_features[] = {
 		.name = "DetECDSA",
 	},
 	{
-		.fetch = "ML-DSA-65",
+		.fetch = "ML-DSA-87",
 		.name = "ML-DSA",
 	},
 	{
@@ -190,7 +190,7 @@ static const struct feature_ signature_features[] = {
 
 static const struct feature_ kem_features[] = {
 	{
-		.fetch = "ML-KEM-768",
+		.fetch = "ML-KEM-1024",
 		.name = "ML-KEM",
 	},
 	{
@@ -200,6 +200,10 @@ static const struct feature_ kem_features[] = {
 	{
 		.fetch = "SecP256r1MLKEM768",
 		.name = "SecP256r1MLKEM768",
+	},
+	{
+		.fetch = "SecP384r1MLKEM1024",
+		.name = "SecP384r1MLKEM1024",
 	},
 };
 
@@ -285,11 +289,11 @@ static void print_security_features(void) {
         EVP_SIGNATURE *signature = NULL;
         EVP_KEM *kem = NULL;
 
-	fprintf(stderr, "\nAvailable approved algorithms for security purposes (fips=yes):\n");
+	fprintf(stderr, "\nAvailable approved algorithms for security purposes (provider=fips,fips=yes):\n");
 
 	for (size_t i = 0; i < ARRAY_SIZE(digest_features); i++)
 	{
-		digest = EVP_MD_fetch(NULL, digest_features[i].fetch, "fips=yes");
+		digest = EVP_MD_fetch(NULL, digest_features[i].fetch, "provider=fips,fips=yes");
 		fprintf(stderr, "\t");
 		if (digest != NULL) {
 			fprintf(stderr, GREEN_CHECK);
@@ -304,7 +308,7 @@ static void print_security_features(void) {
 	}
 	for (size_t i = 0; i < ARRAY_SIZE(signature_features); i++)
 	{
-		signature = EVP_SIGNATURE_fetch(NULL, signature_features[i].fetch, "fips=yes");
+		signature = EVP_SIGNATURE_fetch(NULL, signature_features[i].fetch, "provider=fips,fips=yes");
 		fprintf(stderr, "\t");
 		if (strcmp(signature_features[i].name, "DetECDSA") == 0
 		    && detecdsa == 0) {
@@ -324,7 +328,7 @@ static void print_security_features(void) {
 	}
 	for (size_t i = 0; i < ARRAY_SIZE(kem_features); i++)
 	{
-		kem = EVP_KEM_fetch(NULL, kem_features[i].fetch, "fips=yes");
+		kem = EVP_KEM_fetch(NULL, kem_features[i].fetch, "provider=fips,fips=yes");
 		fprintf(stderr, "\t");
 		if (kem != NULL) {
 			fprintf(stderr, GREEN_CHECK);
@@ -393,6 +397,27 @@ static void print_module_version(void) {
                                 "https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/5132",
                                 OSC_8_END,
                                 "CMVP #5132",
+                                OSC_8_START,
+                                "",
+                                OSC_8_END,
+                                " (with ",
+                                OSC_8_START,
+                                "https://csrc.nist.gov/projects/cryptographic-module-validation-program/entropy-validations/certificate/191",
+                                OSC_8_END,
+                                "entropy #E191",
+                                OSC_8_START,
+                                "",
+                                OSC_8_END,
+                                ")"
+                        );
+                        return;
+                }
+                if (strncmp(vers, "3.6.0", 5) == 0) {
+                        fprintf(stderr, "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
+                                OSC_8_START,
+                                "https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/5523",
+                                OSC_8_END,
+                                "CMVP #5523",
                                 OSC_8_START,
                                 "",
                                 OSC_8_END,
