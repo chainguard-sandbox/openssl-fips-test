@@ -135,6 +135,7 @@ struct feature_ {
 
 #define BOLD_RED "\x1B[0;1;31m"
 #define BOLD_GREEN "\x1B[0;1;32m"
+#define BOLD_GREY "\x1B[0;1;90m"
 #define RESET "\x1B[0m"
 
 #define OSC_8_START "\033]8;;"
@@ -146,6 +147,7 @@ struct feature_ {
 #define RED_CROSS (BOLD_RED "✗ " RESET)
 #define GREEN_CHECK (BOLD_GREEN "✓ " RESET)
 #define GREEN_CROSS (BOLD_GREEN "✗ " RESET)
+#define GREY_QUESTION (BOLD_GREY "? " RESET)
 
 int selftest_passes = 0;
 int selftest_failures = 0;
@@ -581,19 +583,22 @@ static void print_module_cves(void) {
 	params[0] = OSSL_PARAM_construct_utf8_ptr(OSSL_PROV_PARAM_NAME, &name, sizeof(name));
 	params[1] = OSSL_PARAM_construct_utf8_ptr(OSSL_PROV_PARAM_VERSION, &vers, sizeof(vers));
 	params[2] = OSSL_PARAM_construct_end();
-	if (!OSSL_PROVIDER_get_params(prov, params))
+	if (!OSSL_PROVIDER_get_params(prov, params) || !OSSL_PARAM_modified(params + 1))
 		return;
 
 	bool chainguard = strcmp(name, "Chainguard FIPS Provider for OpenSSL") == 0
 		&& (strncmp(vers, "3.4.", 4) == 0 || strncmp(vers, "3.6.", 4) == 0);
-
-	if (!chainguard && strncmp(vers, "3.1.2", 5) != 0)
-		return;
+	bool v312 = strncmp(vers, "3.1.2", 5) == 0;
 
 	fprintf(stderr, "\nCVE fix status in the FIPS module boundary:\n");
 	for (size_t i = 0; i < ARRAY_SIZE(fips_cves); i++)
 	{
 		fprintf(stderr, "\t");
+		if (!chainguard && !v312) {
+			fprintf(stderr, GREY_QUESTION);
+			fprintf(stderr, "%-14s enquire with the vendor\n", fips_cves[i]);
+			continue;
+		}
 		if (chainguard || strcmp(fips_cves[i], "CVE-2026-28386") == 0)
 			fprintf(stderr, GREEN_CHECK);
 		else {
