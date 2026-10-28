@@ -19,10 +19,100 @@
 
 #include <openssl/core_names.h>
 #include <openssl/crypto.h>
+#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/provider.h>
 #include <openssl/self_test.h>
 #include <openssl/opensslv.h>
+
+#include <dlfcn.h>
+
+/*
+ * libcrypto is dlopen'ed at runtime, OpenSSL headers are only used for
+ * function prototypes.
+ */
+#define LIBCRYPTO_FUNCS(X) \
+	X(ERR_clear_error) \
+	X(EVP_default_properties_is_fips_enabled) \
+	X(EVP_KEM_fetch) \
+	X(EVP_KEM_free) \
+	X(EVP_KEYEXCH_fetch) \
+	X(EVP_KEYEXCH_free) \
+	X(EVP_MD_fetch) \
+	X(EVP_MD_free) \
+	X(EVP_PKEY_free) \
+	X(EVP_PKEY_Q_keygen) \
+	X(EVP_Q_mac) \
+	X(EVP_SIGNATURE_fetch) \
+	X(EVP_SIGNATURE_free) \
+	X(OpenSSL_version) \
+	X(OSSL_LIB_CTX_get0_global_default) \
+	X(OSSL_PARAM_construct_end) \
+	X(OSSL_PARAM_construct_utf8_ptr) \
+	X(OSSL_PARAM_construct_utf8_string) \
+	X(OSSL_PARAM_locate_const) \
+	X(OSSL_PARAM_modified) \
+	X(OSSL_PROVIDER_available) \
+	X(OSSL_PROVIDER_get_params) \
+	X(OSSL_PROVIDER_load) \
+	X(OSSL_SELF_TEST_set_callback)
+
+#define LIBCRYPTO_DECLARE(f) static __typeof__(&f) p_##f;
+LIBCRYPTO_FUNCS(LIBCRYPTO_DECLARE)
+
+static const char *libcrypto_names[] = {
+	"libcrypto.so.4",
+	"libcrypto.so.3",
+	"libcrypto.so",
+};
+
+static bool
+load_libcrypto(void)
+{
+	void *handle = NULL;
+
+	for (size_t i = 0; i < sizeof(libcrypto_names) / sizeof(*libcrypto_names) && handle == NULL; i++)
+		handle = dlopen(libcrypto_names[i], RTLD_NOW | RTLD_GLOBAL);
+
+	if (handle == NULL) {
+		fprintf(stderr, "Failed to dlopen libcrypto: %s\n", dlerror());
+		return false;
+	}
+
+#define LIBCRYPTO_LOAD(f) \
+	if ((p_##f = (__typeof__(p_##f))dlsym(handle, #f)) == NULL) { \
+		fprintf(stderr, "Failed to load %s from libcrypto: %s\n", #f, dlerror()); \
+		return false; \
+	}
+	LIBCRYPTO_FUNCS(LIBCRYPTO_LOAD)
+
+	return true;
+}
+
+#define ERR_clear_error p_ERR_clear_error
+#define EVP_default_properties_is_fips_enabled p_EVP_default_properties_is_fips_enabled
+#define EVP_KEM_fetch p_EVP_KEM_fetch
+#define EVP_KEM_free p_EVP_KEM_free
+#define EVP_KEYEXCH_fetch p_EVP_KEYEXCH_fetch
+#define EVP_KEYEXCH_free p_EVP_KEYEXCH_free
+#define EVP_MD_fetch p_EVP_MD_fetch
+#define EVP_MD_free p_EVP_MD_free
+#define EVP_PKEY_free p_EVP_PKEY_free
+#define EVP_PKEY_Q_keygen p_EVP_PKEY_Q_keygen
+#define EVP_Q_mac p_EVP_Q_mac
+#define EVP_SIGNATURE_fetch p_EVP_SIGNATURE_fetch
+#define EVP_SIGNATURE_free p_EVP_SIGNATURE_free
+#define OpenSSL_version p_OpenSSL_version
+#define OSSL_LIB_CTX_get0_global_default p_OSSL_LIB_CTX_get0_global_default
+#define OSSL_PARAM_construct_end p_OSSL_PARAM_construct_end
+#define OSSL_PARAM_construct_utf8_ptr p_OSSL_PARAM_construct_utf8_ptr
+#define OSSL_PARAM_construct_utf8_string p_OSSL_PARAM_construct_utf8_string
+#define OSSL_PARAM_locate_const p_OSSL_PARAM_locate_const
+#define OSSL_PARAM_modified p_OSSL_PARAM_modified
+#define OSSL_PROVIDER_available p_OSSL_PROVIDER_available
+#define OSSL_PROVIDER_get_params p_OSSL_PROVIDER_get_params
+#define OSSL_PROVIDER_load p_OSSL_PROVIDER_load
+#define OSSL_SELF_TEST_set_callback p_OSSL_SELF_TEST_set_callback
 
 struct test_ {
 	const char *name;
@@ -61,6 +151,7 @@ int selftest_passes = 0;
 int selftest_failures = 0;
 int selftest_total = 0;
 int detecdsa = 0;
+int weaknesses = 0;
 
 static bool
 test_fips_module_is_available(void)
@@ -130,6 +221,9 @@ static const struct test_ tests[] = {
 };
 
 static const struct digest_ non_approved_digests[] = {
+	{
+		.name = "MD4",
+	},
 	{
 		.name = "MD5",
 	},
@@ -207,6 +301,19 @@ static const struct feature_ kem_features[] = {
 	},
 };
 
+/* CVEs within the FIPS module boundary, from https://openssl-library.org/news/fips-cve/ */
+static const char *fips_cves[] = {
+	"CVE-2026-42770",
+	"CVE-2026-31790",
+	"CVE-2026-28386",
+	"CVE-2024-13176",
+	"CVE-2024-4603",
+	"CVE-2023-6237",
+	"CVE-2023-1255",
+	"CVE-2023-0217",
+	"CVE-2022-4304",
+};
+
 
 static int self_test_events(const OSSL_PARAM params[], void *arg)
 {
@@ -259,28 +366,59 @@ static int self_test_events(const OSSL_PARAM params[], void *arg)
 	return false;
 }
 
+static const char *non_security_propqs[] = {
+	"fips=no",
+	"provider=legacy",
+};
+
+static bool
+test_hmac_blocked(const char *digest, const char *propq)
+{
+	size_t outlen = 0;
+	OSSL_PARAM params[2];
+
+	params[0] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_PROPERTIES, (char *)propq, 0);
+	params[1] = OSSL_PARAM_construct_end();
+
+	unsigned char *hmac = EVP_Q_mac(NULL, "HMAC", propq, digest, params, "12345678901234", 14, NULL, 0, NULL, 0, &outlen);
+	if (hmac != NULL) {
+		free(hmac);
+		return false;
+	}
+
+	return true;
+}
+
 static void print_non_security_digests(void) {
 	EVP_MD *digest = NULL;
 
-	fprintf(stderr, "\nDigests available for non-security use as per FIPS 140-3 I.G. 2.4.A (fips=no):\n");
+	fprintf(stderr, "\nNon-approved allowed legacy services for non-security purposes as per FIPS 140-3 I.G. 2.4.A:\n");
 
 	for (size_t i = 0; i < ARRAY_SIZE(non_approved_digests); i++)
 	{
-		digest = EVP_MD_fetch(NULL, non_approved_digests[i].name, "?fips=no");
-		fprintf(stderr, "\t");
-		if (digest != NULL) {
+		const char *propq = NULL;
 
+		for (size_t j = 0; j < ARRAY_SIZE(non_security_propqs) && digest == NULL; j++)
+		{
+			propq = non_security_propqs[j];
+			digest = EVP_MD_fetch(NULL, non_approved_digests[i].name, propq);
+			ERR_clear_error();
+		}
+		if (digest == NULL)
+			continue;
+
+		fprintf(stderr, "\t");
+		if (test_hmac_blocked(non_approved_digests[i].name, propq)) {
 			fprintf(stderr, GREEN_CHECK);
-			fprintf(stderr, "%s", non_approved_digests[i].name);
-			EVP_MD_free(digest);
-			digest = NULL;
+			fprintf(stderr, "%-4s Digest-only; no HMAC, no digital signatures", non_approved_digests[i].name);
 		} else {
-			fprintf(stderr, "\t");
 			fprintf(stderr, RED_CROSS);
-			fprintf(stderr, "%s", non_approved_digests[i].name);
-			fprintf(stderr, "- expect failures with all public cloud SDKs");
+			fprintf(stderr, "%-4s HMAC not blocked", non_approved_digests[i].name);
 		}
 		fprintf(stderr, "\n");
+		ERR_clear_error();
+		EVP_MD_free(digest);
+		digest = NULL;
 	}
 }
 
@@ -289,7 +427,7 @@ static void print_security_features(void) {
         EVP_SIGNATURE *signature = NULL;
         EVP_KEM *kem = NULL;
 
-	fprintf(stderr, "\nAvailable approved algorithms for security purposes (provider=fips,fips=yes):\n");
+	fprintf(stderr, "\nApproved services allowed for security purposes:\n");
 
 	for (size_t i = 0; i < ARRAY_SIZE(digest_features); i++)
 	{
@@ -343,6 +481,85 @@ static void print_security_features(void) {
 	}
 }
 
+static void print_fips_compliance(void) {
+	EVP_KEYEXCH *keyexch = NULL;
+	unsigned char *hmac = NULL;
+	size_t outlen = 0;
+	EVP_PKEY *rsa1k = NULL, *rsa2k = NULL;
+	EVP_PKEY *ec192 = NULL, *ec256 = NULL;
+
+	fprintf(stderr, "\nFIPS algorithms compliance:\n");
+
+	/* RSA 1024 provides 80 bits of security, RSA 2048 provides 112 bits */
+	rsa1k = EVP_PKEY_Q_keygen(NULL, NULL, "RSA", (size_t)1024);
+	ERR_clear_error();
+	rsa2k = EVP_PKEY_Q_keygen(NULL, NULL, "RSA", (size_t)2048);
+	ERR_clear_error();
+	if (rsa2k != NULL) {
+		fprintf(stderr, "\t");
+		if (rsa1k != NULL) {
+			fprintf(stderr, RED_CROSS);
+			weaknesses++;
+			fprintf(stderr, "%-6s allows less than 112 bits of security", "RSA");
+		} else {
+			fprintf(stderr, GREEN_CHECK);
+			fprintf(stderr, "%-6s enforces minimum 112 bits of security", "RSA");
+		}
+		fprintf(stderr, "\n");
+	}
+	EVP_PKEY_free(rsa1k);
+	EVP_PKEY_free(rsa2k);
+
+	/* prime192v1 provides 96 bits of security, below the 112 bits minimum */
+	ec192 = EVP_PKEY_Q_keygen(NULL, NULL, "EC", "prime192v1");
+	ERR_clear_error();
+	ec256 = EVP_PKEY_Q_keygen(NULL, NULL, "EC", "prime256v1");
+	ERR_clear_error();
+	if (ec256 != NULL) {
+		fprintf(stderr, "\t");
+		if (ec192 != NULL) {
+			fprintf(stderr, RED_CROSS);
+			weaknesses++;
+			fprintf(stderr, "%-6s allows less than 112 bits of security", "ECDSA");
+		} else {
+			fprintf(stderr, GREEN_CHECK);
+			fprintf(stderr, "%-6s enforces minimum 112 bits of security", "ECDSA");
+		}
+		fprintf(stderr, "\n");
+	}
+	EVP_PKEY_free(ec192);
+	EVP_PKEY_free(ec256);
+
+	/* 13 bytes is 104 bits, below the 112 bits minimum key length */
+	hmac = EVP_Q_mac(NULL, "HMAC", NULL, "SHA256", NULL, "1234567890123", 13, NULL, 0, NULL, 0, &outlen);
+	ERR_clear_error();
+	fprintf(stderr, "\t");
+	if (hmac == NULL) {
+		fprintf(stderr, GREEN_CHECK);
+		fprintf(stderr, "%-6s enforces minimum 112 bits of security", "HMAC");
+	} else {
+		fprintf(stderr, RED_CROSS);
+		weaknesses++;
+		fprintf(stderr, "%-6s allows less than 112 bits of security", "HMAC");
+		free(hmac);
+	}
+	fprintf(stderr, "\n");
+
+	keyexch = EVP_KEYEXCH_fetch(NULL, "X25519", "fips=yes");
+	ERR_clear_error();
+	fprintf(stderr, "\t");
+	if (keyexch == NULL) {
+		fprintf(stderr, GREEN_CHECK);
+		fprintf(stderr, "%-6s blocked", "X25519");
+	} else {
+		fprintf(stderr, RED_CROSS);
+		weaknesses++;
+		fprintf(stderr, "%-6s disallowed algorithm marked as approved", "X25519");
+		EVP_KEYEXCH_free(keyexch);
+	}
+	fprintf(stderr, "\n");
+}
+
 static void print_base_version(void) {
 	fprintf(stderr, "\nPublic OpenSSL API (libssl.so & libcrypto.so):\n");
 	fprintf(stderr, "\t%-10s\t%s\n", "name:", OpenSSL_version(OPENSSL_VERSION));
@@ -350,6 +567,41 @@ static void print_base_version(void) {
 	//fprintf(stderr, "\t%-10s\t%s\n", "full-version:", OpenSSL_version(OPENSSL_FULL_VERSION_STRING));
 	//fprintf(stderr, "\t%-10s\t%s\n", "built-on:", OpenSSL_version(OPENSSL_BUILT_ON) + 10);
 	fprintf(stderr, "\n");
+}
+
+static void print_module_cves(void) {
+	OSSL_PROVIDER *prov = NULL;
+	OSSL_PARAM params[3];
+	char *name = "", *vers = "";
+
+	prov = OSSL_PROVIDER_load(NULL, "fips");
+	if (prov == NULL)
+		return;
+
+	params[0] = OSSL_PARAM_construct_utf8_ptr(OSSL_PROV_PARAM_NAME, &name, sizeof(name));
+	params[1] = OSSL_PARAM_construct_utf8_ptr(OSSL_PROV_PARAM_VERSION, &vers, sizeof(vers));
+	params[2] = OSSL_PARAM_construct_end();
+	if (!OSSL_PROVIDER_get_params(prov, params))
+		return;
+
+	bool chainguard = strcmp(name, "Chainguard FIPS Provider for OpenSSL") == 0
+		&& (strncmp(vers, "3.4.", 4) == 0 || strncmp(vers, "3.6.", 4) == 0);
+
+	if (!chainguard && strncmp(vers, "3.1.2", 5) != 0)
+		return;
+
+	fprintf(stderr, "\nCVE fix status in the FIPS module boundary:\n");
+	for (size_t i = 0; i < ARRAY_SIZE(fips_cves); i++)
+	{
+		fprintf(stderr, "\t");
+		if (chainguard || strcmp(fips_cves[i], "CVE-2026-28386") == 0)
+			fprintf(stderr, GREEN_CHECK);
+		else {
+			fprintf(stderr, RED_CROSS);
+			weaknesses++;
+		}
+		fprintf(stderr, "%s\n", fips_cves[i]);
+	}
 }
 
 static void print_module_version(void) {
@@ -391,7 +643,7 @@ static void print_module_version(void) {
                         );
                         return;
                 }
-                if (strncmp(vers, "3.4.0", 5) == 0) {
+                if (strcmp(build, "3.4.0-r5") == 0) {
                         fprintf(stderr, "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
                                 OSC_8_START,
                                 "https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/5132",
@@ -471,6 +723,9 @@ main(int argc, const char *argv[])
 
 	fprintf(stderr, "Checking OpenSSL lifecycle assurance.\n");
 
+	if (!load_libcrypto())
+		return EXIT_FAILURE;
+
 	OSSL_SELF_TEST_set_callback(NULL, self_test_events, NULL);
 
 	for (size_t i = 0; i < ARRAY_SIZE(tests); i++)
@@ -495,13 +750,22 @@ main(int argc, const char *argv[])
 	}
 
 	if (rc == EXIT_SUCCESS) {
+		/* Do not report conditional self-tests triggered by the checks below */
+		OSSL_SELF_TEST_set_callback(NULL, NULL, NULL);
 		print_non_security_digests();
 		//print_security_digests();
 		print_security_features();
+		print_fips_compliance();
+		print_module_cves();
 		print_base_version();
 		print_module_version();
-		fprintf(stderr, BOLD_GREEN);
-		fprintf(stderr, "\nLifecycle assurance satisfied.");
+		if (weaknesses == 0) {
+			fprintf(stderr, BOLD_GREEN);
+			fprintf(stderr, "\nLifecycle assurance satisfied.");
+		} else {
+			fprintf(stderr, BOLD_RED);
+			fprintf(stderr, "\nLifecycle assurance satisfied. Unacceptable weaknesses detected. Continuous monitoring required.");
+		}
 		fprintf(stderr, RESET);
 		fprintf(stderr, "\n");
 	} else {
